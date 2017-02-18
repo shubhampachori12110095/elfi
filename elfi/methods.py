@@ -1,9 +1,12 @@
 import logging
 from functools import partial
+import itertools
 
 import numpy as np
 import dask
 from distributed import Client
+import scipy as sp
+import scipy.stats as ss
 
 from elfi import core, Result, Result_SMC
 from elfi import Discrepancy, Transform
@@ -615,4 +618,97 @@ class BOLFI(ABCMethod):
         BolfiPosterior object
         """
         return BolfiPosterior(self.model, threshold)
+
+
+def compute_cor_matrix(method, informative_objectives, priors, size, n):
+    """Compute the correlation matrix between etas"""
+    components = itertools.combinations(range(n), 2)
+    correlations = [compute_correlation(method, informative_objective[component],
+                                        priors[component], size)
+                    for component in components]
+    cor = make_matrix(correlations, n)
+    return cor 
+
+def make_matrix(correlations, n):
+    I = np.eye(n)
+    O = np.zeros((n, n))
+    indices = itertools.combinations(range(n), 2)
+    for (i, inx) in enumerate(indices):
+        O[inx] = correlations[i]
+
+    return O + O.T + I
+
+def compute_correlation(method, informative_objective, prior, size):
+    samples = method(informative_objective, prior, size)
+    c1, c2 = samples[:, 0], samples[:, 1]
+    r1 = np.argsort(c1) + 1
+    r2 = np.argsort(c2) + 1
+    n = len(r1)
+    eta1 = ss.norm.ppf(r1/(n + 1))
+    eta2 = ss.norm.ppf(r2/(n + 1))
+    cor = np.corrcoef(eta1, eta2)[1,1]
+    return cor
+
+def compute_marginals(method, informative_objectives, priors, size):
+    marignals = [compute_marginal(method, informative_objectives[i], prior, size)
+                 for (i, prior) in priors]
+    return marginals
+
+def compute_marginal(method, informative_objective, prior, size):
+    samples = method(informative_objective, prior, size)
+    kernel = ss.gaussian_kde(samples)
+    return kernel.pdf
+
+def marginal_log_prod(marginals):
+    def fun(theta):
+        res = 0
+        for (i, t) in enumerate(theta):
+            res += np.log(marginals[i](t))
+        return res
+    return fun
+
+def log_copula(correlation_matrix, marginals):
+    logprod = marginal_log_prod(marginals)
+    eta = compute_eta(marginals)
+    def fun(theta):
+        a = np.log(1/np.sqrt(correlation_matrix.det()))
+        b = (1/2 * eta.T.dot(np.eye(len(eta)) -
+                             np.linalg.inv(correlation_matrix)))
+        c = logprod(theta)
+        return a + b + c
+    return joint
+
+def compute_eta(marginals):
+    def eta(theta):
+        _eta = []
+        for (i, t) in enumerate(theta):
+            eta_i = ss.norm.ppf(sp.integrate.quad(marginals[i], -np.inf, t)[0])
+            _eta.append(eta_i)
+        return np.array(_eta)
+    return eta
+
+## Only have 1d priors
+def copula_abc(method, objectives, priors, objectives_2d, size, priors_2d=None):
+    n = len(priors)
+    priors_2d = priors_2d or make_2d_priors(priors)
+    marginals = compute_marginals(method, objectives, priors, size)
+    correlation_mat = compute_cor_matrix(method, objectives_2d, priors_2d, size, n)
+    return log_copula(correlation_mat, marginals)
+
+def make_2d_priors(priors):
+    n = len(priors)
+    components = itertools.combinations(range(n), 2)
+    prior_pairs = [combine_priors(priors, c) for c in components]
+    return prior_pairs
+
+def combine_priors(priors, component):
+    i, j = component
+    return priors[i] + priors[j]
+
+
+def informative_summary(index, summary):
+    return summary[:, index]
+
+class Copula(ABCMethod):
+    pass
 
