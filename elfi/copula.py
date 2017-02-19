@@ -9,6 +9,7 @@ from . import methods
 from .distributions import Prior
 
 def make_matrix(correlations, n):
+    """Construct a full correlation matrix from pairwise correlations."""
     I = np.eye(n)
     O = np.zeros((n, n))
     indices = itertools.combinations(range(n), 2)
@@ -17,43 +18,52 @@ def make_matrix(correlations, n):
 
     return O + O.T + I
 
-def marginal_log_prod(marginals):
-    def fun(theta):
-        res = 0
-        for (i, t) in enumerate(theta):
-            res += np.log(marginals[i](t))
-        return res
-    return fun
+# def marginal_log_prod(marginals):
+#     """Construct a function that computes the product of the marginals."""
+#     def fun(theta):
+#         res = 0
+#         for (i, t) in enumerate(theta):
+#             res += np.log(marginals[i](t))
+#         return res
+#     return fun
 
-def log_copula(correlation_matrix, marginals):
-    logprod = marginal_log_prod(marginals)
-    eta = compute_eta(marginals)
-    n = len(marginals)
-    def fun(theta):
-        a = np.log(1/np.sqrt(np.linalg.det(correlation_matrix)))
-        L = np.eye(n) - np.linalg.inv(correlation_matrix)
-        quadratic = 1/2 * eta(theta).T.dot(L).dot(eta(theta))
-        c = logprod(theta)
-        return a + quadratic + c
-    return fun
+# def log_copula(correlation_matrix, marginals):
+#     """Construct the meta-Gaussian density function."""
+#     logprod = marginal_log_prod(marginals)
+#     eta = compute_eta(marginals)
+#     n = len(marginals)
+#     def fun(theta):
+#         a = np.log(1/np.sqrt(np.linalg.det(correlation_matrix)))
+#         L = np.eye(n) - np.linalg.inv(correlation_matrix)
+#         quadratic = 1/2 * eta(theta).T.dot(L).dot(eta(theta))
+#         c = logprod(theta)
+#         return a + quadratic + c
+#     return fun
 
-def compute_eta(marginals):
-    def eta(theta):
-        _eta = []
-        for (i, t) in enumerate(theta):
-            eta_i = ss.norm.ppf(sp.integrate.quad(marginals[i], -np.inf, t)[0])
-            _eta.append(eta_i)
-        return np.array(_eta)
-    return eta
+# def compute_eta(marginals):
+#     """Construct a function that computes eta."""
+#     def eta(theta):
+#         _eta = []
+#         for (i, t) in enumerate(theta):
+#             eta_i = ss.norm.ppf(sp.integrate.quad(marginals[i], -np.inf, t)[0])
+#             _eta.append(eta_i)
+#         return np.array(_eta)
+#     return eta
 
 
 class Copula(object):
-    """Sketch for the copula ABC method from: https://arxiv.org/abs/1504.04093"""
+    """Sketch for the copula ABC method from: https://arxiv.org/abs/1504.04093
 
-    def __init__(self, method, parameter_dist, methods_1d=None,
-                 methods_2d=None, **kwargs):
-        # TODO: improve instantiation
-        # super(Copula, self).__init__(**kwargs)
+    Arguments
+    ---------
+    method: ABCMethod
+      the ABC method used to approximate the marginal distributions
+    parameter_dist: dict
+      a dictionary that maps parameter nodes to their respective
+      informative discrepancy nodes
+    """
+
+    def __init__(self, method, parameter_dist, **kwargs):
         self.arity = len(parameter_dist)
         self._log_pdf = None
         self._marginals = []
@@ -62,18 +72,27 @@ class Copula(object):
         self._parameter_dist = parameter_dist
         self._1d_methods = {}
         self._2d_methods = {}
+        self.kdes = None
+        self.estimated = False
 
     def estimate(self, n_samples=100):
-        # self._marginals = self._estimate_marginals(n_samples)
+        """Estimate the posterior using a Gaussian copula.
+
+        Arguments
+        ---------
+        n_samples: int
+          number of samples to use for each marginal estimate
+        """
         self._log_pdf = self._estimate_copula(n_samples)
 
     def sample(self, n_samples):
+        """Sample values from the approzimate posterior."""
         raise NotImplementedError
 
-    def __call__(self, theta):
-        if self._log_pdf is None:
-            self.estimate()
-        return self._log_pdf(theta)
+    def diagnose_quality(self):
+        """Evaluate whether the full posterior may be adequately modelled by
+        a Gaussian copula."""
+        raise NotImplementedError
 
     def _plot_marginal(self, inx, bounds, points=100):
         t = np.linspace(*bounds, points)
@@ -120,22 +139,67 @@ class Copula(object):
         sample = res.samples[marginal[0].name], res.samples[marginal[1].name]
         return sample
         
-    def _estimate_marginal(self, marginal, n_samples):
+    # def _estimate_marginal(self, marginal, n_samples):
+    #     samples = self._sample_from_marginal(marginal, n_samples)
+    #     kernel = ss.gaussian_kde(samples.reshape(-1))
+    #     return kernel.pdf
+
+    # def _estimate_marginals(self, n_samples):
+    #     marginals = [self._estimate_marginal(m, n_samples)
+    #                  for m in self._parameter_dist]
+    #     return marginals
+
+    def _marginal_kde(self, marginal, n_samples):
+        #TODO: add 2d
         samples = self._sample_from_marginal(marginal, n_samples)
         kernel = ss.gaussian_kde(samples.reshape(-1))
-        return kernel.pdf
-    
-    def _estimate_marginals(self, n_samples):
-        marginals = [self._estimate_marginal(m, n_samples)
-                     for m in self._parameter_dist]
-        return marginals
+        return kernel
 
-    def _estimate_copula(self, n_samples):
-        if not self._marginals:
-            self._marginals = self._estimate_marginals(n_samples)
-        if self._cm is None:
-            self._cm = self._cor_matrix(n_samples)
-        return log_copula(self._cm, self._marginals)
+    def _marginal_kdes(self, n_samples):
+        marginal_params = self._parameter_dist
+        kdes = [self._marginal_kde(m, n_samples) for m in marginal_params]
+        self.kdes = kdes
+
+    def _eta_i(self, i, t):
+        return ss.norm.ppf(self.kdes[i].integrate_box_1d(-np.inf, t))
+
+    def _eta(self, theta):
+        return np.array([self._eta_i(i, t) for (i, t) in enumerate(theta)])
+
+    def _marginal_prod(self, theta):
+        """Evaluate the logarithm of the poduct of the marginals."""
+        res = 0
+        for (i, t) in enumerate(theta):
+            res += self.kdes[i].logpdf(t)
+        return res
+    
+    # def _estimate_copula(self, n_samples):
+    #     if not self._marginals:
+    #         self._marginals = self._estimate_marginals(n_samples)
+    #     if self._cm is None:
+    #         self._cm = self._cor_matrix(n_samples)
+    #     return log_copula(self._cm, self._marginals)
+
+    def logpdf(self, theta):
+        if len(theta.shape) == 1:
+            return self._logpdf(theta)
+        elif len(theta.shape) == 2:
+            return np.array([self._logpdf(t) for t in theta])
+
+    __call__ = logpdf
+
+    def _logpdf(self, theta):
+        n = self.arity
+        if self.estimated:
+            correlation_matrix = self._cm
+            a = np.log(1/np.sqrt(np.linalg.det(correlation_matrix)))
+            L = np.eye(n) - np.linalg.inv(correlation_matrix)
+            quadratic = 1/2 * self._eta(theta).T.dot(L).dot(self._eta(theta))
+            c = self._marginal_prod(theta)
+            return a + quadratic + c
+        else:
+            raise ValueError("The marginal distributions"
+                             " have not been estimated yet.")
 
     def _estimate_correlation(self, marginal, n_samples):
         samples = self._sample_from_marginal(marginal, n_samples)
