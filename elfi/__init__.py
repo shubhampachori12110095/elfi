@@ -10,8 +10,6 @@ from elfi.wrapper import *
 from elfi.env import client, inference_task, new_inference_task
 from elfi import tools
 
-from . import copula
-
 __author__ = 'ELFI authors'
 __email__ = 'elfi-support@hiit.fi'
 
