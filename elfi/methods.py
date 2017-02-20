@@ -643,14 +643,14 @@ class GaussianCopula(object):
       informative discrepancy nodes
     """
 
-    def __init__(self, method, parameter_dist, **kwargs):
+    def __init__(self, methods1d, methods2d, method=None, parameter_dist=None, **kwargs):
         self.arity = len(parameter_dist)
         self._log_pdf = None
         self._cm = None
         self.method = method
         self._parameter_dist = parameter_dist
-        self._1d_methods = {}
-        self._2d_methods = {}
+        self._1d_methods = methods1d
+        self._2d_methods = methods2d
         self.kdes = None
         self.estimated = False
 
@@ -771,7 +771,7 @@ class GaussianCopula(object):
         n = len(r1)
         eta1 = ss.norm.ppf(r1/(n + 1))
         eta2 = ss.norm.ppf(r2/(n + 1))
-        cor = np.corrcoef(eta1, eta2)[1,1]
+        cor = np.corrcoef(eta1, eta2)[0,1]
         return cor
 
     def _cor_matrix(self, n_samples):
